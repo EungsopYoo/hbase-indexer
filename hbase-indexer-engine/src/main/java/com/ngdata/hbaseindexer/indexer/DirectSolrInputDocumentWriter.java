@@ -18,17 +18,21 @@ package com.ngdata.hbaseindexer.indexer;
 import static com.ngdata.hbaseindexer.metrics.IndexerMetricsUtil.metricName;
 
 import java.io.IOException;
+import java.text.SimpleDateFormat;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import com.ngdata.hbaseindexer.conf.IndexerConf;
 import com.yammer.metrics.Metrics;
 import com.yammer.metrics.core.Meter;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.solr.client.solrj.SolrServer;
 import org.apache.solr.client.solrj.SolrServerException;
+import org.apache.solr.client.solrj.impl.CloudSolrServer;
+import org.apache.solr.client.solrj.request.UpdateRequest;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.SolrInputDocument;
@@ -51,9 +55,14 @@ import org.apache.solr.common.SolrInputDocument;
  * update will be retried individually.
  */
 public class DirectSolrInputDocumentWriter implements SolrInputDocumentWriter {
+    private static final String COLLECTION_PARAM = "collection";
+    private static final String COLLECTION_NOT_FOUND_MESSAGE = "Could not find collection";
+    private static final String ROTATION_PARAM_KEY = "rotation";
+    private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy_MM_dd_HH_mm");
 
     private Log log = LogFactory.getLog(getClass());
     private SolrServer solrServer;
+    private final IndexerConf indexerConf;
     private Meter indexAddMeter;
     private Meter indexDeleteMeter;
     private Meter solrAddErrorMeter;
@@ -62,7 +71,12 @@ public class DirectSolrInputDocumentWriter implements SolrInputDocumentWriter {
     private Meter documentDeleteErrorMeter;
 
     public DirectSolrInputDocumentWriter(String indexName, SolrServer solrServer) {
+        this(indexName, null, solrServer);
+    }
+
+    public DirectSolrInputDocumentWriter(String indexName, IndexerConf indexerConf, SolrServer solrServer) {
         this.solrServer = solrServer;
+        this.indexerConf = indexerConf;
         
         indexAddMeter = Metrics.newMeter(metricName(getClass(), "Index adds", indexName), "Documents added to Solr index",
                 TimeUnit.SECONDS);
@@ -80,7 +94,8 @@ public class DirectSolrInputDocumentWriter implements SolrInputDocumentWriter {
     }
 
     private boolean isDocumentIssue(SolrException e) {
-        return e.code() == ErrorCode.BAD_REQUEST.code;
+        // If the collection does not exist, the exception must not be ignored to retry write indefinitely.
+        return e.code() == ErrorCode.BAD_REQUEST.code && !e.getMessage().contains(COLLECTION_NOT_FOUND_MESSAGE);
     }
 
     private void logOrThrowSolrException(SolrException solrException) {
@@ -101,7 +116,13 @@ public class DirectSolrInputDocumentWriter implements SolrInputDocumentWriter {
     public void add(int shard, Map<String, SolrInputDocument> inputDocumentMap) throws SolrServerException, IOException {
         Collection<SolrInputDocument> inputDocuments = inputDocumentMap.values();
         try {
-            solrServer.add(inputDocuments);
+            if (solrServer instanceof CloudSolrServer && isRotatingCollection()) {
+                UpdateRequest req = createUpdateRequestWithCollectionRotation();
+                req.add(inputDocuments);
+                req.process(this.solrServer);
+            } else {
+                solrServer.add(inputDocuments);
+            }
             indexAddMeter.mark(inputDocuments.size());
         } catch (SolrException e) {
             if (isDocumentIssue(e)) {
@@ -114,6 +135,26 @@ public class DirectSolrInputDocumentWriter implements SolrInputDocumentWriter {
             solrAddErrorMeter.mark(inputDocuments.size());
             throw sse;
         }
+    }
+
+    private UpdateRequest createUpdateRequestWithCollectionRotation() {
+        UpdateRequest req = new UpdateRequest();
+        req.setParam(COLLECTION_PARAM, rotateCollection());
+        return req;
+    }
+
+    private boolean isRotatingCollection() {
+        if (indexerConf == null) return false;
+        String rotationValue = indexerConf.getGlobalParams().get(ROTATION_PARAM_KEY);
+        return rotationValue != null && rotationValue.toLowerCase().equals("true");
+    }
+
+    private String rotateCollection() {
+        CloudSolrServer cloudSolrServer = (CloudSolrServer) this.solrServer;
+        String collection = cloudSolrServer.getDefaultCollection();
+        String timestamp = DATE_FORMAT.format(System.currentTimeMillis());
+        timestamp = timestamp.substring(0, timestamp.length() - 1) + "0";   //fixme
+        return collection + "_" + timestamp;
     }
 
     private void retryAddsIndividually(Collection<SolrInputDocument> inputDocuments) throws SolrServerException,
@@ -139,7 +180,13 @@ public class DirectSolrInputDocumentWriter implements SolrInputDocumentWriter {
     @Override
     public void deleteById(int shard, List<String> idsToDelete) throws SolrServerException, IOException {
         try {
-            solrServer.deleteById(idsToDelete);
+            if (solrServer instanceof CloudSolrServer && isRotatingCollection()) {
+                UpdateRequest req = createUpdateRequestWithCollectionRotation();
+                req.deleteById(idsToDelete);
+                req.process(this.solrServer);
+            } else {
+                solrServer.deleteById(idsToDelete);
+            }
             indexDeleteMeter.mark(idsToDelete.size());
         } catch (SolrException e) {
             if (isDocumentIssue(e)) {
@@ -175,7 +222,13 @@ public class DirectSolrInputDocumentWriter implements SolrInputDocumentWriter {
     @Override
     public void deleteByQuery(String deleteQuery) throws SolrServerException, IOException {
         try {
-            solrServer.deleteByQuery(deleteQuery);
+            if (solrServer instanceof CloudSolrServer && isRotatingCollection()) {
+                UpdateRequest req = createUpdateRequestWithCollectionRotation();
+                req.deleteByQuery(deleteQuery);
+                req.process(this.solrServer);
+            } else {
+                solrServer.deleteByQuery(deleteQuery);
+            }
         } catch (SolrException e) {
             if (isDocumentIssue(e)) {
                 documentDeleteErrorMeter.mark(1);

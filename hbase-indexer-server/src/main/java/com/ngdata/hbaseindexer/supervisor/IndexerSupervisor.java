@@ -209,7 +209,8 @@ public class IndexerSupervisor {
                 String solrMode = SolrConnectionParamUtil.getSolrMode(connectionParams);
                 if (solrMode.equals("cloud")) {
                     int zkSessionTimeout = HBaseIndexerConfiguration.getSessionTimeout(hbaseConf);
-                    solrWriter = new DirectSolrInputDocumentWriter(indexerDef.getName(), createCloudSolrServer(connectionParams, zkSessionTimeout));
+                    solrWriter = new DirectSolrInputDocumentWriter(indexerDef.getName(), indexerConf,
+                        createCloudSolrServer(connectionParams, zkSessionTimeout));
                 } else if (solrMode.equals("classic")) {
                     connectionManager = new PoolingClientConnectionManager();
                     connectionManager.setDefaultMaxPerRoute(getSolrMaxConnectionsPerRoute(connectionParams));

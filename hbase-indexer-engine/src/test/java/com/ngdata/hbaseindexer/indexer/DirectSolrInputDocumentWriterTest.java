@@ -15,26 +15,34 @@
  */
 package com.ngdata.hbaseindexer.indexer;
 
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 
+import com.google.common.base.Charsets;
 import com.google.common.collect.ImmutableSortedMap;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
+import com.ngdata.hbaseindexer.conf.DefaultIndexerComponentFactory;
+import com.ngdata.hbaseindexer.conf.IndexerComponentFactory;
+import com.ngdata.hbaseindexer.conf.IndexerComponentFactoryUtil;
+import com.ngdata.hbaseindexer.conf.IndexerConf;
+import com.ngdata.hbaseindexer.model.api.IndexerDefinition;
+import com.ngdata.hbaseindexer.model.api.IndexerDefinitionBuilder;
 import org.apache.solr.client.solrj.SolrServer;
 import org.apache.solr.client.solrj.SolrServerException;
+import org.apache.solr.client.solrj.impl.CloudSolrServer;
+import org.apache.solr.client.solrj.request.UpdateRequest;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.SolrInputDocument;
 import org.junit.Before;
 import org.junit.Test;
+
+import static org.mockito.Mockito.*;
 
 public class DirectSolrInputDocumentWriterTest {
 
@@ -54,7 +62,7 @@ public class DirectSolrInputDocumentWriterTest {
         Map<String, SolrInputDocument> toAdd = ImmutableSortedMap.of("idA", inputDocA, "idB", inputDocB);
 
         solrWriter.add(-1, toAdd);
-        
+
         verify(solrServer).add(toAdd.values());
     }
 
@@ -165,10 +173,71 @@ public class DirectSolrInputDocumentWriterTest {
     @Test
     public void testDeleteByQuery() throws SolrServerException, IOException {
         String deleteQuery = "_delete_query_";
-        
+
         solrWriter.deleteByQuery(deleteQuery);
-        
+
         verify(solrServer).deleteByQuery(deleteQuery);
     }
 
+    @Test
+    public void testAdd_NormalCase_CollectionRotation() throws SolrServerException, IOException {
+        mockCloudSolrServerWithRotation();
+
+        SolrInputDocument inputDocA = mock(SolrInputDocument.class);
+        SolrInputDocument inputDocB = mock(SolrInputDocument.class);
+        Map<String, SolrInputDocument> toAdd = ImmutableSortedMap.of("idA", inputDocA, "idB", inputDocB);
+
+        solrWriter.add(-1, toAdd);
+
+        verify(solrServer, times(0)).add(toAdd.values());
+        verify(solrServer, times(0)).add(toAdd.values(), -1);
+        verify(solrServer, atLeastOnce()).request(any(UpdateRequest.class));
+    }
+
+    private void mockCloudSolrServerWithRotation() {
+        solrServer = mock(CloudSolrServer.class);
+
+        IndexerDefinition indexerDef = new IndexerDefinitionBuilder()
+          .name("index1")
+          .indexerComponentFactory(DefaultIndexerComponentFactory.class.getName())
+          .configuration(("<?xml version=\"1.0\"?>" +
+            "<indexer table=\"test\" read-row=\"never\" unique-key-formatter=\"com.ngdata.hbaseindexer.uniquekey.HexUniqueKeyFormatter\">" +
+            "<field name=\"value\" value=\"l:*\" type=\"string\"/>" +
+            "<param name=\"rotation\" value=\"true\"/>" +
+            "</indexer>").getBytes(Charsets.UTF_8))
+          .build();
+
+        IndexerComponentFactory factory =
+          IndexerComponentFactoryUtil.getComponentFactory(indexerDef.getIndexerComponentFactory(),
+            new ByteArrayInputStream(indexerDef.getConfiguration()), indexerDef.getConnectionParams());
+        IndexerConf indexerConf = factory.createIndexerConf();
+
+        solrWriter = new DirectSolrInputDocumentWriter("index name", indexerConf, solrServer);
+    }
+
+    @Test
+    public void testDeleteById_NormalCase_CollectionRotation() throws SolrServerException, IOException {
+        mockCloudSolrServerWithRotation();
+
+        List<String> toDelete = Lists.newArrayList("idA", "idB");
+
+        solrWriter.deleteById(-1, toDelete);
+
+        verify(solrServer, times(0)).deleteById(toDelete);
+        verify(solrServer, times(0)).deleteById(toDelete, -1);
+        verify(solrServer, atLeastOnce()).request(any(UpdateRequest.class));
+    }
+
+    @Test
+    public void testDeleteByQuery_CollectionRotation() throws SolrServerException, IOException {
+        mockCloudSolrServerWithRotation();
+
+        String deleteQuery = "_delete_query_";
+
+        solrWriter.deleteByQuery(deleteQuery);
+
+        verify(solrServer, times(0)).deleteByQuery(deleteQuery);
+        verify(solrServer, times(0)).deleteByQuery(deleteQuery, -1);
+        verify(solrServer, atLeastOnce()).request(any(UpdateRequest.class));
+    }
 }
